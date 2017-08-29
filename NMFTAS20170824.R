@@ -1,0 +1,383 @@
+#This file is to read drug-target and drug-cell line, process them and apply NMF 
+
+# method for drug target deconvolution
+# Part1. read and process drug- cell line data, (process includes keeping targetted
+# drugs and remove repeated drugs.)
+setwd("C:/Users/parhar/Desktop/master-thesis")
+library(xlsx)
+library(gtools)
+library(MASS)
+library(stats)
+library(NMFN)
+library(NMF)
+library(nmfgpu4R)
+library(R.matlab)
+library(IntNMF)
+###################################################################################
+# reads drug-cell line matrix, 990*266 -- AUC values:(there are missing values - NA)
+
+TableS4B <- read.xlsx2("TableS4B.xlsx", 1, startRow = 6,check.names=FALSE, header = T, colIndex = seq(2, 267, 1),
+                       colClasses = c('character', rep('numeric', 265)))
+
+# there is one " " item in TableS4B
+###################################################################################
+# reads drug-target matrix, 265*9 
+
+TableS1F <- read.xlsx2("TableS1F.xlsx", 1, startRow = 3, header = T)
+###################################################################################
+#Saves cytotoxic and non defined drugs in the following variable 23*9 
+
+TableS1Fcyto <- TableS1F[which(TableS1F$Action == "cytotoxic" | TableS1F$Action == "not defined" ), ]
+#tst<- TableS1F[which(TableS1F$Action == "targeted" ), ]
+###################################################################################
+#list of duplicated drugs, to be excluded:
+
+drop1 <- c("AZD6482.1","BMS-708163.1","BMS-536924.1","GSK269962A.1","JQ1.1","UNC0638.1",
+           "CHIR-99021.1","Olaparib (rescreen)","AZD6244.1","Bicalutamide.1","RDEA119 (rescreen)","GDC0941 (rescreen)","PLX4720 (rescreen)","Afatinib (rescreen)")
+
+###################################################################################
+# df is 990*232 matrix, duplicated drugs are ommitted
+
+# df = TableS4Bnotoxic[,!(colnames(TableS4Bnotoxic) %in% drop)]
+
+# TableS4Bnotoxic of AUC values includes only targetting drugs
+library(data.table)
+TableS4Bnotoxic<- TableS4B[, (colnames(TableS4B) %in% TableS1Fcyto$Name == F)]
+#TableS4Bnotoxictst<- TableS4B[, (colnames(TableS4B) %in% tst$Name == T)]
+
+#coltox1<-colnames(TableS4Bnotoxic)
+#coltox2<-colnames(TableS4Bnotoxictst)
+
+#setdiff(coltox1,coltox2)
+
+# Outcome of this part is df 990*233 matrix of AUC values, only targetting drugs
+
+df <- TableS4Bnotoxic[,!(colnames(TableS4Bnotoxic) %in% drop1)]
+
+#dfa <- TableS4Bnotoxictst[,!(colnames(TableS4Bnotoxictst) %in% drop1)]
+
+#pari1 <- TableS4Bnotoxic[,(colnames(TableS4Bnotoxic) %in% drop1)]
+colnames(df)[1] <- "Sample names"
+
+#write.xlsx(TableS4Bnotoxic, "C:/Users/parhar/Desktop/master-thesis/par1.xlsx")
+
+#write.xlsx(df, "C:/Users/parhar/Desktop/master-thesis/dfpar.xlsx")
+# TableS4B with no drugs with cytotoxic action and not defined action: 990*242
+##################################################################################
+
+#Part 2, reading and processing drug-target data-
+
+
+drop2 <- c("RDEA119 (rescreen)","GDC0941 (rescreen)","PLX4720 (rescreen)","Afatinib (rescreen)")
+data1a <- TableS1F[which(TableS1F$Action == "targeted" ), ]
+
+data12<-data1a[!duplicated(data1a$Name),]
+data13<-data12[which(!data12$Name %in% drop2),]
+
+#data11<- TableS1F[, (TableS1F$Name %in% TableS1Fcyto$Name == F)]
+
+#setdiff(colnames(TableS4Bnotoxic),as.character(data1$Name))
+#data11<-data1[which(as.character(data1$Name) %in% drop2),]
+
+data1<-data13
+
+data2 <- unlist(as.character(data1[, 7]))
+data2b <- as.character(data1[, 2])
+
+# Any "Name"-columns has upto 9 putative targets
+
+data3 <- matrix(NA, ncol = 10, nrow = length(data2))
+for (i in 1:length(data2)) {
+  trim1 <- trimws(unlist(strsplit(data2[i], ",")))
+  data3[i, 1:(length(trim1) + 1)] <- c(data2b[i], trim1)
+}
+colnames(data3) <- c("Name", "PT1", "PT2", "PT3", "PT4", "PT5", "PT6", "PT7", "PT8", "PT9")
+
+# data3 includes all the possible putative targets for each "Name" ad a variable.
+# As "Name"'s include different amounts of different putative targets, there are
+#lots of NA's in data3
+
+data4 <- as.data.frame(data3)
+library(reshape)
+data5 <- melt(data4, id.vars = "Name") #Transposing data
+data6 <- data5[order(data5$Name),]  #Ordering it by "Name"
+data7 <- data6[-2] #Removing variable no longer needed
+#data7b <- data7[!duplicated(data7), ] #Removing duplicates
+#In addition to NA's, some might occur if they have same prefix and number in the end
+#  --- not sure why melt function does that
+colnames(data7) <- c("Compounds", "Targets")
+data8 <- data7[!is.na(data7$Targets),] #Removing the NA's
+
+#data9 is 198*232 matrix
+
+data9<- xtabs(~Targets+Compounds, data=data8)
+
+#data9<-unique(data8)
+
+#datatst<-unique(data7)
+
+#data9 <- as.matrix(table(data8)) #That matrix without any ordering yet
+#data12<- t(data9)
+################################################################################
+# data9 is the output of part 2
+##################################################################################
+#Part 3: apply NMF on df, data9
+
+
+
+Cc1<-data9[,1:50]
+attributes(Cc1)$class <- "matrix" 
+Ci1<-t(Cc1)  #50*198 (drug-target binary) 
+
+drugs<-rownames(Ci1)
+
+targets<-colnames(Ci1)
+
+
+my.list <- append("Sample names", drugs)
+
+df1<-df[, colnames(df) %in% my.list ]  #990*50
+
+Jj3<-na.omit(df1) #250*50
+
+col.order <- c(my.list)
+Jj4<-Jj3[,col.order]
+
+Ji4<-Jj4[,2:51]
+
+Jk4<-as.matrix(Ji4)
+
+Y4<-t(Jk4)
+library(Matrix)
+library(optimbase)
+ONE1<-ones(nx = 50, ny = 250)
+library(corpcor)
+
+Yp4<-ONE1-Y4
+
+Yp5<-Yp4
+colnames(Yp5)<-Jj4[,1]
+
+Yq5<-Y4
+
+colnames(Yq5)<-Jj4[,1]
+
+#tmpCC<- fcnnls(Ci1, Yp4, pseudo=TRUE)
+
+#test this:
+
+tmptest<-fcnnls(Ci1, Yp5, pseudo=TRUE)
+
+targetcelltst<-tmptest$x
+
+aheatmap(targetcelltst)
+##################################
+
+myXtmpc<-targetcelltst  # result 198*250 - target*cell-line
+
+myXtmpca<-myXtmpc
+
+#colnames(myXtmpca)<-Jj4[,1]
+
+
+write.xlsx(myXtmpca, "C:/Users/parhar/Desktop/master-thesis/myXsam2.xlsx")
+
+colls<-colnames(myXsam2)
+
+colls[1]<-NA
+
+colls1<-na.omit(colls)
+
+myXtmpcb<-myXtmpc
+
+colnames(myXtmpcb)<-colls1
+
+write.xlsx(myXtmpc, "C:/Users/parhar/Desktop/master-thesis/NMF20170705.xlsx")
+
+aheatmap(myXtmpc)
+
+###########################
+#Output is targetcelltst
+#######################################################################
+
+#Part 4: TAS 
+
+data8tas<-subset(data8, data8$Compounds %in% drugs )
+
+write.xlsx(Yq5, "C:/Users/parhar/Desktop/master-thesis/myXYq.xlsx") 
+
+write.xlsx(Yp5, "C:/Users/parhar/Desktop/master-thesis/myXY7.xlsx") 
+
+d.sena<-myXYq
+
+d.sen<-myXY7
+d.tar<- data8tas
+
+write.xlsx(data8, "C:/Users/parhar/Desktop/master-thesis/data8y.xlsx")
+
+TAS<-function(d.sen,d.tar){
+  
+  ds<-as.matrix(d.sen)
+  dt<-as.matrix(d.tar)
+  
+  #ds<-as.matrix(TASA)
+  #dt<-as.matrix(TASB)  
+  
+  
+  targets<-unique(as.character(dt[,2]))
+  tas.matrix<-matrix(NA,length(targets)*(ncol(ds)-1),5)
+  colnames(tas.matrix)<-c("Target","TAS","#Compounds","Cell_lines","list_of_compounds")
+  counter=1
+  for(j in 2:ncol(ds)){ #FOR EACH cell line
+    temp.tas.matrix<-matrix(NA,length(targets),5)
+    for(i in (1:length(targets))){ # FOR EACH TARGETS
+      
+      inddt<-which(!is.na(match(dt[,2],targets[i])))
+      compd<-as.character(dt[inddt,1])
+      indds<-match(compd,ds[,1])
+      
+      sub.ds<-subset(ds, is.element(as.character(ds[,1]),compd)==T & ds[,j]!="NA") #Number of inhibitors
+      compd<-as.character(sub.ds[,1])
+      target.addiction<-sum(as.numeric(sub.ds[,j]))/nrow(sub.ds)  # sum of drug sensitivity for inhibitors of targets in a given sample/cellline normalised by the number of inhibitors
+      temp.tas.matrix[i,]<-cbind(targets[i],target.addiction,nrow(sub.ds),colnames(ds)[j],paste(compd,collapse=","))
+      
+    }
+    tas.matrix[counter:(counter+length(targets)-1),]<-temp.tas.matrix
+    counter=counter+length(targets)
+  }
+  tas.matrix<-as.data.frame(tas.matrix)
+  tas.matrix<-tas.matrix[!is.na(tas.matrix$TAS),]
+  return(tas.matrix)
+}
+celltarget<-TAS(d.sen,d.tar)
+
+celltargeta<-TAS(d.sena,d.tar)
+
+write.xlsx(celltarget, "C:/Users/parhar/Desktop/master-thesis/celltarget0828.xlsx")
+
+d.sen<-myXY7
+d.tar<- data8tas
+
+celltargetQ<-TAS(d.sen,d.tar)
+
+datatas<- xtabs(~Targets+Compounds, data=d.tar)
+attributes(datatas)$class <- "matrix" 
+
+tp1tas<-xtabs(as.numeric(TAS) ~ Target+Cell_lines, data=celltarget)
+attributes(tp1tas)$class <- "matrix" 
+
+
+
+tp1tasQ<-xtabs(as.numeric(levels(TAS)[TAS]) ~ Target+Cell_lines, data=celltargetQ)
+attributes(tp1tasQ)$class <- "matrix" 
+
+
+#We need to choose corres. targets in myXtmpc and order them accord.
+
+colTAS<-colnames(tp1)
+rowTAS<-rownames(tp1)
+
+#myXtmpc1<-myXtmpccom[, colnames(myXtmpccom) %in%  colTAS] 
+
+#myXtmpcb2<-myXtmpcb[ rownames(myXtmpcb) %in% drugs,] 
+myXtmpcb2<-myXtmpcb
+
+col.order1 <- c(colTAS)
+myXtmpcb3<-myXtmpcb[,col.order1]
+
+row.order1 <- c(rowTAS)
+myXtmpcb4<-myXtmpcb3[row.order1,]
+######################################################################
+aheatmap(tp1tasQ)
+aheatmap(myXtmpcb4)
+###########################################
+
+#aheatmap(tp1)
+#aheatmap(myXtmpcb4)
+
+#############################
+
+
+
+
+tass<-celltargetQ$TAS
+#<-tass[1:5]
+aaa<-as.numeric(levels(tass)[tass])
+
+nb1<-myXtmpcb4[,6]
+plot(aaa[1:62],as.numeric(nb1), xlab="TAS", ylab="NMF",main="Cell-line:All.Po" )
+
+targetnames<-celltargetQ$Target
+
+plot(aaa[1:62],as.numeric(nb1), xlab="TAS", ylab="NMF",main="Cell-line:All.Po" )
+text(aaa[1:62],as.numeric(nb1), labels=targetnames, cex= 0.7,pos=3)
+
+plot(aaa[63:124],as.numeric(myXtmpcb4[,7]), xlab="TAS", ylab="NMF",main="Cell-line:AMO.1" )
+text(aaa[63:124],as.numeric(myXtmpcb4[,7]), labels=targetnames, cex= 0.7,pos=3)
+
+##############################################
+
+#Read continuous data
+
+# we read first drutargetzia.xlsx
+library(data.table)
+dat<-drugtargetzia
+keys <- colnames(dat)[!grepl('standard_value',colnames(dat))]
+X <- as.data.table(dat)
+Xxx<-X[,list(mm= median(standard_value)),keys]
+
+#Xxx1<-Xxx[ Xxx$compound_name %in%  rowTAS,] 
+#Xxx1<-subset(Xxx, Xxx$Compounds %in% drugs,ignore.case = TRUE )
+
+Dru<-Xxx$compound_name
+
+Targ<-Xxx$gene_names
+
+Freq<-Xxx$mm
+
+Xyy<-xtabs(Freq ~ Dru+Targ, data=Xxx)
+
+attributes(Xyy)$class <- "matrix" 
+
+Xuu<-Xyy[rownames(Xyy) %in% toupper(drugs)  ,] 
+
+#Xuu1<-Xyy[  toupper(rownames(Xyy)) %in% toupper(drugs) ,] 
+
+
+Xvv<-Xuu[, toupper(colnames(Xuu)) %in% toupper(rowTAS)] 
+#Xvvi<-Xuu[, toupper(rowTAS)  %in%  toupper(colnames(Xuu)) ] 
+
+
+row.orders1 <- rownames(Xvv)
+Ci2<-Ci1
+
+rownames(Ci2)<-toupper(rownames(Ci2))
+tp4<-Ci2[row.orders1,  ]
+
+#df1<-df[, colnames(df) %in% my.list ]
+
+col.orders1 <- c(rowTAS)
+tp5<-tp4[,col.orders1]
+
+tp5==0
+Oo<-Xvv[tp5==0]
+
+Oo1<-na.omit(Oo)
+
+tmp1<- density(Oo1)
+
+plot(tmp1,xlab=" ",ylab = "" ,main = "Density plot for continuous drug-target values when the value in binary matrix is zero")
+
+Ii<-Xvv[tp5==1 | tp5==2]
+
+Ii1<-na.omit(Ii)
+
+tmp2<- density(Ii1)
+
+plot(tmp2,xlab=" ",ylab = "" ,main = "Density plot for continuous drug-target values when the value in binary matrix is one")
+
+
+
+
+
+
